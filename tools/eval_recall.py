@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 import _init_paths
 from fast_rcnn.config import cfg, cfg_from_file, cfg_from_list
