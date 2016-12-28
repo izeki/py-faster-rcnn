@@ -33,6 +33,12 @@ case $DATASET in
     echo "Not implemented: use experiments/scripts/faster_rcnn_end2end.sh for coco"
     exit
     ;;
+  caltech)
+    TRAIN_IMDB="caltech_train"
+    TEST_IMDB="caltech_test"
+    PT_DIR="caltech"
+    ITERS=40000
+    ;;
   *)
     echo "No dataset given"
     exit
@@ -44,6 +50,7 @@ exec &> >(tee -a "$LOG")
 echo Logging output to "$LOG"
 
 time ./tools/train_faster_rcnn_alt_opt.py --gpu ${GPU_ID} \
+  --model_path ${PT_DIR}
   --net_name ${NET} \
   --weights data/imagenet_models/${NET}.v2.caffemodel \
   --imdb ${TRAIN_IMDB} \

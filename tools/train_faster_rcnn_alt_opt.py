@@ -24,6 +24,7 @@ import pprint
 import numpy as np
 import sys
 import os
+import os.path as osp
 import multiprocessing as mp
 import cPickle
 import shutil
@@ -43,6 +44,11 @@ def parse_args():
         '--net_name', dest='net_name',
         help='network name (e.g., "ZF")',
         default=None, type=str
+    )
+    parser.add_argument(
+        '--model_path', dest='model_path',
+        help='model path',
+        default='pascal_voc', type=str
     )
     parser.add_argument(
         '--weights', dest='pretrained_model',
@@ -255,6 +261,9 @@ if __name__ == '__main__':
     if args.set_cfgs is not None:
         cfg_from_list(args.set_cfgs)
     cfg.GPU_ID = args.gpu_id
+    
+    model_path = args.model_path
+    cfg.MODELS_DIR = osp.abspath(osp.join(cfg.ROOT_DIR, 'models', model_path))
 
     # --------------------------------------------------------------------------
     # Pycaffe doesn't reliably free GPU memory when instantiated nets are

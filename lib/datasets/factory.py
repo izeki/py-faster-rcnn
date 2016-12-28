@@ -6,6 +6,7 @@
 # --------------------------------------------------------
 from datasets.pascal_voc import pascal_voc
 from datasets.coco import coco
+from datasets.caltech import caltech
 import numpy as np
 
 
@@ -31,6 +32,11 @@ for year in ['2015']:
     for split in ['test', 'test-dev']:
         name = 'coco_{}_{}'.format(year, split)
         __sets[name] = (lambda split=split, year=year: coco(split, year))
+        
+# Set up caltech_<split>
+for split in ['train', 'test']:
+    name = 'caltech_{}'.foramt(split)
+    __sets[name] = (lambda split=split: caltech(split))
 
 
 def get_imdb(name):
