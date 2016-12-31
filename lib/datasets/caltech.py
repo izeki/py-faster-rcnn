@@ -232,7 +232,7 @@ class caltech(imdb):
         seg_areas = np.zeros((num_objs), dtype=np.float32)
         
         # Load object bounding boxes into a data frame.
-        for ped in pedestrians:
+        for ix, ped in enumerate(pedestrians):
             # Make pixel indexes 0-based
             x1 = ped[1] - 1
             y1 = ped[0] - 1
