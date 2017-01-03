@@ -13,7 +13,7 @@ RoIDataLayer implements a Caffe Python layer.
 
 import caffe
 from fast_rcnn.config import cfg
-from roi_data_layer.minibatch import get_minibatch
+from roi_data_layer.minibatch import get_minibatch, get_next_sequence
 import numpy as np
 import yaml
 from multiprocessing import Process, Queue
@@ -66,11 +66,33 @@ class RoIDataLayer(caffe.Layer):
             minibatch_db = [self._roidb[i] for i in db_inds]
 
             return get_minibatch(minibatch_db, self._num_classes)
+    
+    def _get_next_sequence_inds(self):
+        """Retun the roidb indices for the next minibatch in sequential order."""
+        db_inds = self._perm[self._cur:self._cur+cfg.TRAIN.__C.TRAIN.VIDEO_CLIP_LENGTH * cfg.TRAIN.FRAME_PER_BATCH]
+        self.cur += cfg.TRAIN.FRAME_PER_BATCH
+        
+        return db_inds        
+    
+    def _get_next_sequence_data(self):
+        """Return the blobs to used for the next minibatch in sequential order."""
+        db_inds = self._get_next_sequence_inds()
+        next_db = [self._roidb[i] for i in db_inds]
+        return get_next_sequence(next_db, self._num_classes)
 
     def set_roidb(self, roidb):
         """Set the roidb to be used by this layer during training."""
         self._roidb = roidb
-        self._shuffle_roidb_inds()
+        
+        # check lstm enable. Since the lstm uses sequential data in training process
+        # the random sampling feature is turned off.
+        if self._lstm is 'on':
+            # no permutation
+            self._perm = np.arange(len(self._roidb))
+            self._cur = 0
+        else:
+            self._shuffle_roidb_inds()
+
         if cfg.TRAIN.USE_PREFETCH:
             self._blob_queue = Queue(10)
             self._prefetch_process = BlobFetcher(self._blob_queue,
@@ -94,65 +116,99 @@ class RoIDataLayer(caffe.Layer):
         layer_params = yaml.load(self.param_str)
 
         self._num_classes = layer_params['num_classes']
-
+        
+        # support sequential data for LSTM training
+        self._lstm = layer_params.get('lstm', 'off')
+        
         self._name_to_top_map = {}
+        
+        # check lstm enable
+        if self._lstm is 'on':
+            # data blob: holds a batch of N images, each with 3 channels
+            idx = 0
+            top[idx].reshape(
+                cfg.TRAIN.VIDEO_CLIP_LENGTH * cfg.TRAIN.FRAME_PER_BATCH, 3,
+                max(cfg.TRAIN.SCALES), cfg.TRAIN.MAX_SIZE
+            )
 
-        # data blob: holds a batch of N images, each with 3 channels
-        idx = 0
-        top[idx].reshape(
-            cfg.TRAIN.IMS_PER_BATCH, 3,
-            max(cfg.TRAIN.SCALES), cfg.TRAIN.MAX_SIZE
-        )
-
-        self._name_to_top_map['data'] = idx
-        idx += 1
-
-        if cfg.TRAIN.HAS_RPN:
+            self._name_to_top_map['data'] = idx
+            idx += 1
+            
             top[idx].reshape(1, 3)
             self._name_to_top_map['im_info'] = idx
             idx += 1
-
-            top[idx].reshape(1, 4)
+            
+            # gt_boxes blob n, x1, y1, x2, y2, class
+            top[idx].reshape(1,6)
             self._name_to_top_map['gt_boxes'] = idx
             idx += 1
+
+            # clip_markers: TxN flags to control whether the previous state should be kelpt
+            # T is the time length and N is the data length per unit time
+            top[idx].reshape(cfg.TRAIN.VIDEO_CLIP_LENGTH * cfg.TRAIN.FRAME_PER_BATCH, 1)
+            self._name_to_top_map['clip_markers'] = idx   
+            idx += 1
         else:
-            # not using RPN
-            # rois blob: holds R regions of interest, each is a 5-tuple
-            # (n, x1, y1, x2, y2) specifying an image batch index n and a
-            # rectangle (x1, y1, x2, y2)
-            top[idx].reshape(1, 5)
-            self._name_to_top_map['rois'] = idx
+            # data blob: holds a batch of N images, each with 3 channels
+            idx = 0
+            top[idx].reshape(
+                cfg.TRAIN.IMS_PER_BATCH, 3,
+                max(cfg.TRAIN.SCALES), cfg.TRAIN.MAX_SIZE
+            )
+
+            self._name_to_top_map['data'] = idx
             idx += 1
 
-            # labels blob: R categorical labels in [0, ..., K] for K foreground
-            # classes plus background
-            top[idx].reshape(1)
-            self._name_to_top_map['labels'] = idx
-            idx += 1
-
-            if cfg.TRAIN.BBOX_REG:
-                # bbox_targets blob: R bounding-box regression targets with 4
-                # targets per class
-                top[idx].reshape(1, self._num_classes * 4)
-                self._name_to_top_map['bbox_targets'] = idx
+            if cfg.TRAIN.HAS_RPN:
+                top[idx].reshape(1, 3)
+                self._name_to_top_map['im_info'] = idx
                 idx += 1
 
-                # bbox_inside_weights blob: At most 4 targets per roi are active;
-                # thisbinary vector sepcifies the subset of active targets
-                top[idx].reshape(1, self._num_classes * 4)
-                self._name_to_top_map['bbox_inside_weights'] = idx
+                top[idx].reshape(1, 4)
+                self._name_to_top_map['gt_boxes'] = idx
+                idx += 1            
+            else:
+                # not using RPN
+                # rois blob: holds R regions of interest, each is a 5-tuple
+                # (n, x1, y1, x2, y2) specifying an image batch index n and a
+                # rectangle (x1, y1, x2, y2)
+                top[idx].reshape(1, 5)
+                self._name_to_top_map['rois'] = idx
                 idx += 1
 
-                top[idx].reshape(1, self._num_classes * 4)
-                self._name_to_top_map['bbox_outside_weights'] = idx
+                # labels blob: R categorical labels in [0, ..., K] for K foreground
+                # classes plus background
+                top[idx].reshape(1)
+                self._name_to_top_map['labels'] = idx
                 idx += 1
+
+                if cfg.TRAIN.BBOX_REG:
+                    # bbox_targets blob: R bounding-box regression targets with 4
+                    # targets per class
+                    top[idx].reshape(1, self._num_classes * 4)
+                    self._name_to_top_map['bbox_targets'] = idx
+                    idx += 1
+
+                    # bbox_inside_weights blob: At most 4 targets per roi are active;
+                    # thisbinary vector sepcifies the subset of active targets
+                    top[idx].reshape(1, self._num_classes * 4)
+                    self._name_to_top_map['bbox_inside_weights'] = idx
+                    idx += 1
+
+                    top[idx].reshape(1, self._num_classes * 4)
+                    self._name_to_top_map['bbox_outside_weights'] = idx
+                    idx += 1
 
         print('RoiDataLayer: name_to_top:', self._name_to_top_map)
         assert len(top) == len(self._name_to_top_map)
 
     def forward(self, bottom, top):
         """Get blobs and copy them into this layer's top blob vector."""
-        blobs = self._get_next_minibatch()
+        # check lstm enable
+        if self._lstm is 'on':
+            blobs = self._get_next_sequence_data()
+        else:
+            blobs = self._get_next_minibatch()
 
         for blob_name, blob in blobs.items():
             top_ind = self._name_to_top_map[blob_name]

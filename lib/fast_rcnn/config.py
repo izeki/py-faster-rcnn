@@ -45,6 +45,12 @@ __C.TRAIN.MAX_SIZE = 1000
 # Images to use per minibatch
 __C.TRAIN.IMS_PER_BATCH = 2
 
+# Video clip length in second to use in sequential data generation for lstm training) 
+__C.TRAIN.VIDEO_CLIP_LENGTH = 20
+
+# Frame rate per second to use in sequential data generation (for lstm training)
+__C.TRAIN.FRAME_PER_BATCH = 30
+
 # Minibatch size (number of regions of interest [ROIs])
 __C.TRAIN.BATCH_SIZE = 128
 
@@ -152,6 +158,13 @@ __C.TEST.BBOX_REG = True
 
 # Propose boxes
 __C.TEST.HAS_RPN = False
+
+# Video clip length in second to use in sequential data generation for lstm testing) 
+__C.TEST.VIDEO_CLIP_LENGTH = 20
+
+# Frame rate per second to use in sequential data generation (for lstm testing)
+__C.TEST.FRAME_PER_BATCH = 30
+
 
 # Test using these proposals
 __C.TEST.PROPOSAL_METHOD = 'selective_search'

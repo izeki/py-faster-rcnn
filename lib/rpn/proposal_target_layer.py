@@ -25,6 +25,9 @@ class ProposalTargetLayer(caffe.Layer):
     def setup(self, bottom, top):
         layer_params = yaml.load(self.param_str)
         self._num_classes = layer_params['num_classes']
+        
+        # support sequential data for LSTM training
+        self._lstm = layer_params.get('lstm', 'off')
 
         # sampled rois (0, x1, y1, x2, y2)
         top[0].reshape(1, 5)
@@ -38,62 +41,115 @@ class ProposalTargetLayer(caffe.Layer):
         top[4].reshape(1, self._num_classes * 4)
 
     def forward(self, bottom, top):
-        # Proposal ROIs (0, x1, y1, x2, y2) coming from RPN
-        # (i.e., rpn.proposal_layer.ProposalLayer), or any other source
-        all_rois = bottom[0].data
-        # GT boxes (x1, y1, x2, y2, label)
-        # TODO(rbg): it's annoying that sometimes I have extra info before
-        # and other times after box coordinates -- normalize to one format
-        gt_boxes = bottom[1].data
+        
+        if self._lstm is 'on':
+            num_images = len(bottom[0].data.shape[0])
+            rois_per_image = cfg.TRAIN.BATCH_SIZE / num_images
+            fg_rois_per_image = np.round(cfg.TRAIN.FG_FRACTION * rois_per_image)
+                        
+            rois_blob = np.zeros((0, rois_per_image, 5), dtype=np.float32)
+            labels_blob = np.zeros((0, rois_per_image, 1), dtype=np.float32)
+            
+            for im_i in range(num_images):
+            
+                # Proposal ROIs (n, x1, y1, x2, y2) coming from RPN
+                # (i.e., rpn.proposal_layer.ProposalLayer), or any other source
+                all_rois = bottom[0].data[im_i:im_i+1]
+                # GT boxes: (n, x1, y1, x2, y2, cls)                
+                gt_boxes = bottom[1].data[im_i*rois_per_image:(im_i+1)*rois_per_image-1]
+                gt_boxes = gt_boxes[:,1:]
 
-        # Include ground-truth boxes in the set of candidate rois
-        zeros = np.zeros((gt_boxes.shape[0], 1), dtype=gt_boxes.dtype)
-        all_rois = np.vstack(
-            (all_rois, np.hstack((zeros, gt_boxes[:, :-1])))
-        )
+                # Include ground-truth boxes in the set of candidate rois
+                zeros = np.zeros((gt_boxes.shape[0], 1), dtype=gt_boxes.dtype)
+                all_rois = np.vstack(
+                    (all_rois, np.hstack((zeros, gt_boxes[:, :-1])))
+                )                
 
-        # Sanity check: single batch only
-        assert np.all(all_rois[:, 0] == 0), 'Only single item batches are supported'
+                # Sample rois with classification labels and bounding box regression
+                # targets
+                labels, rois, bbox_targets, bbox_inside_weights = _sample_rois(
+                    all_rois, gt_boxes, fg_rois_per_image,
+                    rois_per_image, self._num_classes)
 
-        num_images = 1
-        rois_per_image = cfg.TRAIN.BATCH_SIZE / num_images
-        fg_rois_per_image = np.round(cfg.TRAIN.FG_FRACTION * rois_per_image)
+                if DEBUG:
+                    print('num fg: {}'.format((labels > 0).sum()))
+                    print('num bg: {}'.format((labels == 0).sum()))
+                    self._count += 1
+                    self._fg_num += (labels > 0).sum()
+                    self._bg_num += (labels == 0).sum()
+                    print('num fg avg: {}'.format(self._fg_num / self._count))
+                    print('num bg avg: {}'.format(self._bg_num / self._count))
+                    print('ratio: {:.3f}'.format(float(self._fg_num) / float(self._bg_num)))
+                
+                rois_blob = np.vstack((rois_blob, rois[np.newaxis,:]))
+                labels_blob = np.vstack((labels_blob, labels[np.newaxis,:]))                
+                
+                
+            # sampled rois
+            top[0].reshape(*rois_blob.shape)
+            top[0].data[...] = rois_blob
 
-        # Sample rois with classification labels and bounding box regression
-        # targets
-        labels, rois, bbox_targets, bbox_inside_weights = _sample_rois(
-            all_rois, gt_boxes, fg_rois_per_image,
-            rois_per_image, self._num_classes)
+            # classification labels
+            top[1].reshape(*labels_blob.shape)
+            top[1].data[...] = labels_blob           
+        
+        else:
+            # Proposal ROIs (0, x1, y1, x2, y2) coming from RPN
+            # (i.e., rpn.proposal_layer.ProposalLayer), or any other source
+            all_rois = bottom[0].data
+            # GT boxes (x1, y1, x2, y2, label)
+            # TODO(rbg): it's annoying that sometimes I have extra info before
+            # and other times after box coordinates -- normalize to one format
+            gt_boxes = bottom[1].data
 
-        if DEBUG:
-            print('num fg: {}'.format((labels > 0).sum()))
-            print('num bg: {}'.format((labels == 0).sum()))
-            self._count += 1
-            self._fg_num += (labels > 0).sum()
-            self._bg_num += (labels == 0).sum()
-            print('num fg avg: {}'.format(self._fg_num / self._count))
-            print('num bg avg: {}'.format(self._bg_num / self._count))
-            print('ratio: {:.3f}'.format(float(self._fg_num) / float(self._bg_num)))
+            # Include ground-truth boxes in the set of candidate rois
+            zeros = np.zeros((gt_boxes.shape[0], 1), dtype=gt_boxes.dtype)
+            all_rois = np.vstack(
+                (all_rois, np.hstack((zeros, gt_boxes[:, :-1])))
+            )
 
-        # sampled rois
-        top[0].reshape(*rois.shape)
-        top[0].data[...] = rois
+            # Sanity check: single batch only
+            assert np.all(all_rois[:, 0] == 0), 'Only single item batches are supported'
 
-        # classification labels
-        top[1].reshape(*labels.shape)
-        top[1].data[...] = labels
+            num_images = 1
+            rois_per_image = cfg.TRAIN.BATCH_SIZE / num_images
+            fg_rois_per_image = np.round(cfg.TRAIN.FG_FRACTION * rois_per_image)
 
-        # bbox_targets
-        top[2].reshape(*bbox_targets.shape)
-        top[2].data[...] = bbox_targets
+            # Sample rois with classification labels and bounding box regression
+            # targets
+            labels, rois, bbox_targets, bbox_inside_weights = _sample_rois(
+                all_rois, gt_boxes, fg_rois_per_image,
+                rois_per_image, self._num_classes)
 
-        # bbox_inside_weights
-        top[3].reshape(*bbox_inside_weights.shape)
-        top[3].data[...] = bbox_inside_weights
+            if DEBUG:
+                print('num fg: {}'.format((labels > 0).sum()))
+                print('num bg: {}'.format((labels == 0).sum()))
+                self._count += 1
+                self._fg_num += (labels > 0).sum()
+                self._bg_num += (labels == 0).sum()
+                print('num fg avg: {}'.format(self._fg_num / self._count))
+                print('num bg avg: {}'.format(self._bg_num / self._count))
+                print('ratio: {:.3f}'.format(float(self._fg_num) / float(self._bg_num)))
 
-        # bbox_outside_weights
-        top[4].reshape(*bbox_inside_weights.shape)
-        top[4].data[...] = np.array(bbox_inside_weights > 0).astype(np.float32)
+            # sampled rois
+            top[0].reshape(*rois.shape)
+            top[0].data[...] = rois
+
+            # classification labels
+            top[1].reshape(*labels.shape)
+            top[1].data[...] = labels
+
+            # bbox_targets
+            top[2].reshape(*bbox_targets.shape)
+            top[2].data[...] = bbox_targets
+
+            # bbox_inside_weights
+            top[3].reshape(*bbox_inside_weights.shape)
+            top[3].data[...] = bbox_inside_weights
+
+            # bbox_outside_weights
+            top[4].reshape(*bbox_inside_weights.shape)
+            top[4].data[...] = np.array(bbox_inside_weights > 0).astype(np.float32)
 
     def backward(self, top, propagate_down, bottom):
         """

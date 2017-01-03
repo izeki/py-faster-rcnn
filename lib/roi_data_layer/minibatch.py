@@ -88,7 +88,100 @@ def get_minibatch(roidb, num_classes):
 
     return blobs
 
+def get_next_sequence(roidb, num_classes):
+    """Given a roidb, construct a sequential minibatch sampled from it."""
+    num_images = len(roidb)
+    # Sample random scales to use for each image in this batch
+    random_scale_inds = npr.randint(
+        0, high=len(cfg.TRAIN.SCALES),
+        size=num_images
+    )
 
+    assert (cfg.TRAIN.BATCH_SIZE % num_images == 0), 'num_images ({}) must divide BATCH_SIZE ({})'.format(
+            num_images, cfg.TRAIN.BATCH_SIZE
+    )
+
+    rois_per_image = cfg.TRAIN.BATCH_SIZE / num_images
+    fg_rois_per_image = np.round(cfg.TRAIN.FG_FRACTION * rois_per_image)
+
+    # Get the input image blob, formatted for caffe
+    im_blob, im_scales, im_infos = _get_seq_image_blob(roidb, random_scale_inds)
+
+    blobs = {'data': im_blob, 'im_info': im_infos}
+    
+    # gt boxes: (n, x1, y1, x2, y2, cls)
+    # since we want to build sequential trianing data 
+    # gt_boxes are sampled from origianl gt_boxes
+    gt_boxes_blob = np.zeros((0, 6), dtype=np.float32)
+   
+    for im_i in range(num_images):
+        clsses, im_rois = _sample_gt_boxes(roidb[im_i], fg_rois_per_image, rois_per_image,
+                               num_classes)
+
+        # Add to gt_boxes blob
+        gt_boxes = _project_im_rois(im_rois, im_scales[im_i])
+        batch_ind = im_i * np.ones((gt_boxes.shape[0], 1))
+        gt_boxes_blob_this_image = np.hstack((batch_ind, gt_boxes, clsses[:,np.newaxis]))
+        gt_boxes_blob = np.vstack((gt_boxes_blob, gt_boxes_blob_this_image))
+    
+    blobs['gt_boxes'] = gt_boxes_blob
+    
+    # clip_markers: TxN flags to control whether the previous state should be kelpt
+    # T is the time length and N is the data length per unit time
+    # Set the bias to the forget gate to 5.0 as explained in the clockwork RNN paper
+    clip_markers_blob = np.ones((blobs['data'].shape[0], 1,1,1), dtype=np.float32)
+    clip_markers_blob[0:cfg.TRAIN.FRAME_PER_BATCH,:,:,:] = 0
+    
+    blobs['clip_markers'] = clip_markers_blob
+    
+    return blobs        
+        
+def _sample_gt_boxes(roidb, fg_rois_per_image, rois_per_image, num_classes):
+    """
+    Generate a random sample from groud truth boxes.
+    TODO: empty gt_boxes need to be considered.
+    """
+    # label = class RoI has max overlap with
+    labels = roidb['max_classes']
+    overlaps = roidb['max_overlaps']
+    rois = roidb['boxes']
+
+    # Select foreground RoIs as those with >= FG_THRESH overlap
+    fg_inds = np.where(overlaps >= cfg.TRAIN.FG_THRESH)[0]
+    # Guard against the case when an image has fewer than fg_rois_per_image
+    # foreground RoIs
+    fg_rois_per_this_image = np.minimum(fg_rois_per_image, fg_inds.size)
+    # Sample foreground regions without replacement
+    if fg_inds.size > 0:
+        fg_inds = npr.choice(
+            fg_inds, size=fg_rois_per_this_image, replace=False
+        )
+
+    # Select background RoIs as those within [BG_THRESH_LO, BG_THRESH_HI)
+    bg_inds = np.where((overlaps < cfg.TRAIN.BG_THRESH_HI) &
+                       (overlaps >= cfg.TRAIN.BG_THRESH_LO))[0]
+    # Compute number of background RoIs to take from this image (guarding
+    # against there being fewer than desired)
+    bg_rois_per_this_image = rois_per_image - fg_rois_per_this_image
+    bg_rois_per_this_image = np.minimum(bg_rois_per_this_image,
+                                        bg_inds.size)
+    # Sample foreground regions without replacement
+    if bg_inds.size > 0:
+        bg_inds = npr.choice(
+            bg_inds, size=bg_rois_per_this_image, replace=False
+        )
+
+    # The indices that we're selecting (both fg and bg)
+    keep_inds = np.append(fg_inds, bg_inds)
+    # Select sampled values from various arrays:
+    labels = labels[keep_inds]
+    # Clamp labels for the background RoIs to 0
+    labels[fg_rois_per_this_image:] = 0
+    rois = rois[keep_inds]    
+
+    return labels, rois    
+    
+    
 def _sample_rois(roidb, fg_rois_per_image, rois_per_image, num_classes):
     """
     Generate a random sample of RoIs comprising foreground and background
@@ -163,6 +256,32 @@ def _get_image_blob(roidb, scale_inds):
 
     return blob, im_scales
 
+def _get_seq_image_blob(roidb, scale_inds):
+    """
+    Builds a sequential input blob from the images in the roidb at the specified
+    scales.
+    """
+    num_images = len(roidb)
+    processed_ims = []
+    im_scales = []
+    im_info_blob = np.zeros((0, 3), dtype=np.float32)
+    for i in range(num_images):
+        im = cv2.imread(roidb[i]['image'])
+        if roidb[i]['flipped']:
+            im = im[:, ::-1, :]
+        target_size = cfg.TRAIN.SCALES[scale_inds[i]]
+        im, im_scale = prep_im_for_blob(im, cfg.PIXEL_MEANS, target_size,
+                                        cfg.TRAIN.MAX_SIZE)
+        im_info = np.array([[im.shape[0], im.shape[1], im_scale]],
+                            dtype=np.float32)
+        im_info_blob = np.vstack((im_info_blob, im_info))
+        im_scales.append(im_scale)
+        processed_ims.append(im)
+
+    # Create a blob to hold the input images
+    blob = im_list_to_blob(processed_ims)
+
+    return blob, im_scales. im_info_blob
 
 def _project_im_rois(im_rois, im_scale_factor):
     """

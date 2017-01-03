@@ -38,6 +38,9 @@ class ProposalLayer(caffe.Layer):
         anchor_scales = layer_params.get('scales', (8, 16, 32))
         self._anchors = generate_anchors(scales=np.array(anchor_scales))
         self._num_anchors = self._anchors.shape[0]
+        
+        # support sequential data for LSTM training
+        self._lstm = layer_params.get('lstm', 'off')
 
         if DEBUG:
             print('feat_stride: {}'.format(self._feat_stride))
@@ -66,115 +69,244 @@ class ProposalLayer(caffe.Layer):
         # apply NMS with threshold 0.7 to remaining proposals
         # take after_nms_topN proposals after NMS
         # return the top proposals (-> RoIs top, scores top)
+        
+        if self._lstm is 'on':
+            
+            num_images = len(bottom[0].data.shape[0])
+            
+            cfg_key = self.get_phase()  # either 'TRAIN' or 'TEST'
+            pre_nms_topN = cfg[cfg_key].RPN_PRE_NMS_TOP_N
+            post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N
+            nms_thresh = cfg[cfg_key].RPN_NMS_THRESH
+            min_size = cfg[cfg_key].RPN_MIN_SIZE
+            
+            #-------------------Setup anchor and shifts-------------------------#
+            height, width = bottom[0].data.shape[-2:]
+            
+            if DEBUG:
+                print('score map size: {}, {}'.format(height, width))
+            
+            # Enumerate all shifts
+            shift_x = np.arange(0, width) * self._feat_stride
+            shift_y = np.arange(0, height) * self._feat_stride
+            shift_x, shift_y = np.meshgrid(shift_x, shift_y)
+            shifts = np.vstack((shift_x.ravel(), shift_y.ravel(),
+                                shift_x.ravel(), shift_y.ravel())).transpose()
 
-        assert bottom[0].data.shape[0] == 1, 'Only single item batches are supported'
+            # Enumerate all shifted anchors:
+            #
+            # add A anchors (1, A, 4) to
+            # cell K shifts (K, 1, 4) to get
+            # shift anchors (K, A, 4)
+            # reshape to (K*A, 4) shifted anchors
+            A = self._num_anchors
+            K = shifts.shape[0]
+            anchors = self._anchors.reshape((1, A, 4)) + shifts.reshape(
+                (1, K, 4)
+            ).transpose((1, 0, 2))
 
-        cfg_key = self.get_phase()  # either 'TRAIN' or 'TEST'
-        pre_nms_topN = cfg[cfg_key].RPN_PRE_NMS_TOP_N
-        post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N
-        nms_thresh = cfg[cfg_key].RPN_NMS_THRESH
-        min_size = cfg[cfg_key].RPN_MIN_SIZE
+            anchors = anchors.reshape((K * A, 4))            
+            #-------------------Setup anchor and shifts-------------------------#
+            
+            rois_blob = np.zeros((0, post_nms_topN, 5), dtype=np.float32)
+            scores_blob = np.zeros((0, post_nms_topN, 1), dtype=np.float32)
+            
+            for im_i in range(num_images):            
 
-        # the first set of _num_anchors channels are bg probs
-        # the second set are the fg probs, which we want
-        scores = bottom[0].data[:, self._num_anchors:, :, :]
-        bbox_deltas = bottom[1].data
-        im_info = bottom[2].data[0, :]
+                # the first set of _num_anchors channels are bg probs
+                # the second set are the fg probs, which we want
+                scores = bottom[0].data[im_i:im_i+1, self._num_anchors:, :, :]                
+                bbox_deltas = bottom[1].data[im_i:im_i+1]                
+                im_info = bottom[2].data[im_i, :]
 
-        if DEBUG:
-            print('im_size: ({}, {})'.format(im_info[0], im_info[1]))
-            print('scale: {}'.format(im_info[2]))
+                if DEBUG:
+                    print('im_size: ({}, {})'.format(im_info[0], im_info[1]))
+                    print('scale: {}'.format(im_info[2]))
 
-        # 1. Generate proposals from bbox deltas and shifted anchors
-        height, width = scores.shape[-2:]
+                # 1. Generate proposals from bbox deltas and shifted anchors
+                # Transpose and reshape predicted bbox transformations to get them
+                # into the same order as the anchors:
+                #
+                # bbox deltas will be (1, 4 * A, H, W) format
+                # transpose to (1, H, W, 4 * A)
+                # reshape to (1 * H * W * A, 4) where rows are ordered by (h, w, a)
+                # in slowest to fastest order
+                bbox_deltas = bbox_deltas.transpose((0, 2, 3, 1)).reshape((-1, 4))
 
-        if DEBUG:
-            print('score map size: {}'.format(scores.shape))
+                # Same story for the scores:
+                #
+                # scores are (1, A, H, W) format
+                # transpose to (1, H, W, A)
+                # reshape to (1 * H * W * A, 1) where rows are ordered by (h, w, a)
+                scores = scores.transpose((0, 2, 3, 1)).reshape((-1, 1))
 
-        # Enumerate all shifts
-        shift_x = np.arange(0, width) * self._feat_stride
-        shift_y = np.arange(0, height) * self._feat_stride
-        shift_x, shift_y = np.meshgrid(shift_x, shift_y)
-        shifts = np.vstack((shift_x.ravel(), shift_y.ravel(),
-                            shift_x.ravel(), shift_y.ravel())).transpose()
+                # Convert anchors into proposals via bbox transformations
+                proposals = bbox_transform_inv(anchors, bbox_deltas)
 
-        # Enumerate all shifted anchors:
-        #
-        # add A anchors (1, A, 4) to
-        # cell K shifts (K, 1, 4) to get
-        # shift anchors (K, A, 4)
-        # reshape to (K*A, 4) shifted anchors
-        A = self._num_anchors
-        K = shifts.shape[0]
-        anchors = self._anchors.reshape((1, A, 4)) + shifts.reshape(
-            (1, K, 4)
-        ).transpose((1, 0, 2))
+                # 2. clip predicted boxes to image
+                proposals = clip_boxes(proposals, im_info[:2])
 
-        anchors = anchors.reshape((K * A, 4))
+                # 3. remove predicted boxes with either height or width < threshold
+                # (NOTE: convert min_size to input image scale stored in im_info[2])
+                keep = _filter_boxes(proposals, min_size * im_info[2])
+                proposals = proposals[keep, :]
+                scores = scores[keep]
 
-        # Transpose and reshape predicted bbox transformations to get them
-        # into the same order as the anchors:
-        #
-        # bbox deltas will be (1, 4 * A, H, W) format
-        # transpose to (1, H, W, 4 * A)
-        # reshape to (1 * H * W * A, 4) where rows are ordered by (h, w, a)
-        # in slowest to fastest order
-        bbox_deltas = bbox_deltas.transpose((0, 2, 3, 1)).reshape((-1, 4))
+                # 4. sort all (proposal, score) pairs by score from highest to lowest
+                # 5. take top pre_nms_topN (e.g. 6000)
+                order = scores.ravel().argsort()[::-1]
 
-        # Same story for the scores:
-        #
-        # scores are (1, A, H, W) format
-        # transpose to (1, H, W, A)
-        # reshape to (1 * H * W * A, 1) where rows are ordered by (h, w, a)
-        scores = scores.transpose((0, 2, 3, 1)).reshape((-1, 1))
+                if pre_nms_topN > 0:
+                    order = order[:pre_nms_topN]
 
-        # Convert anchors into proposals via bbox transformations
-        proposals = bbox_transform_inv(anchors, bbox_deltas)
+                proposals = proposals[order, :]
+                scores = scores[order]
+                
+                
+                # TODO: keep top post_nms_topN proposals
+                # 6. apply nms (e.g. threshold = 0.7) 
+                # 7. take post_nms_topN (e.g. 300)
+                # 8. return the top proposals (-> RoIs top)
+                keep = nms(np.hstack((proposals, scores)), nms_thresh)
 
-        # 2. clip predicted boxes to image
-        proposals = clip_boxes(proposals, im_info[:2])
+                if post_nms_topN > 0:
+                    keep = keep[:post_nms_topN]
 
-        # 3. remove predicted boxes with either height or width < threshold
-        # (NOTE: convert min_size to input image scale stored in im_info[2])
-        keep = _filter_boxes(proposals, min_size * im_info[2])
-        proposals = proposals[keep, :]
-        scores = scores[keep]
+                proposals = proposals[keep, :]
+                scores = scores[keep]
 
-        # 4. sort all (proposal, score) pairs by score from highest to lowest
-        # 5. take top pre_nms_topN (e.g. 6000)
-        order = scores.ravel().argsort()[::-1]
+                # rois blob                
+                batch_inds = im_i * np.ones((proposals.shape[0], 1), dtype=np.float32)
+                blob = np.hstack(
+                    (batch_inds, proposals.astype(np.float32, copy=False))
+                )
+                rois_blob = np.vstack(rois_blob, blob)                
+                
+                # scores blob
+                scores_blob = np.vstack(scores_blob, scores)
+                
+                
+            # Output rois blob
+            top[0].reshape(*(rois_blob.shape))
+            top[0].data[...] = rois_blob
 
-        if pre_nms_topN > 0:
-            order = order[:pre_nms_topN]
+            # [Optional] output scores blob
+            if len(top) > 1:
+                top[1].reshape(*(scores_blob.shape))
+                top[1].data[...] = scores_blob
+            
+            
+        else:        
 
-        proposals = proposals[order, :]
-        scores = scores[order]
+            assert bottom[0].data.shape[0] == 1, 'Only single item batches are supported'
 
-        # 6. apply nms (e.g. threshold = 0.7)
-        # 7. take after_nms_topN (e.g. 300)
-        # 8. return the top proposals (-> RoIs top)
-        keep = nms(np.hstack((proposals, scores)), nms_thresh)
+            cfg_key = self.get_phase()  # either 'TRAIN' or 'TEST'
+            pre_nms_topN = cfg[cfg_key].RPN_PRE_NMS_TOP_N
+            post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N
+            nms_thresh = cfg[cfg_key].RPN_NMS_THRESH
+            min_size = cfg[cfg_key].RPN_MIN_SIZE
 
-        if post_nms_topN > 0:
-            keep = keep[:post_nms_topN]
+            # the first set of _num_anchors channels are bg probs
+            # the second set are the fg probs, which we want
+            scores = bottom[0].data[:, self._num_anchors:, :, :]
+            bbox_deltas = bottom[1].data
+            im_info = bottom[2].data[0, :]            
 
-        proposals = proposals[keep, :]
-        scores = scores[keep]
+            if DEBUG:
+                print('im_size: ({}, {})'.format(im_info[0], im_info[1]))
+                print('scale: {}'.format(im_info[2]))
 
-        # Output rois blob
-        # Our RPN implementation only supports a single input image, so all
-        # batch inds are 0
-        batch_inds = np.zeros((proposals.shape[0], 1), dtype=np.float32)
-        blob = np.hstack(
-            (batch_inds, proposals.astype(np.float32, copy=False))
-        )
-        top[0].reshape(*(blob.shape))
-        top[0].data[...] = blob
+            # 1. Generate proposals from bbox deltas and shifted anchors
+            height, width = scores.shape[-2:]
 
-        # [Optional] output scores blob
-        if len(top) > 1:
-            top[1].reshape(*(scores.shape))
-            top[1].data[...] = scores
+            if DEBUG:
+                print('score map size: {}'.format(scores.shape))
+
+            # Enumerate all shifts
+            shift_x = np.arange(0, width) * self._feat_stride
+            shift_y = np.arange(0, height) * self._feat_stride
+            shift_x, shift_y = np.meshgrid(shift_x, shift_y)
+            shifts = np.vstack((shift_x.ravel(), shift_y.ravel(),
+                                shift_x.ravel(), shift_y.ravel())).transpose()
+
+            # Enumerate all shifted anchors:
+            #
+            # add A anchors (1, A, 4) to
+            # cell K shifts (K, 1, 4) to get
+            # shift anchors (K, A, 4)
+            # reshape to (K*A, 4) shifted anchors
+            A = self._num_anchors
+            K = shifts.shape[0]
+            anchors = self._anchors.reshape((1, A, 4)) + shifts.reshape(
+                (1, K, 4)
+            ).transpose((1, 0, 2))
+
+            anchors = anchors.reshape((K * A, 4))
+
+            # Transpose and reshape predicted bbox transformations to get them
+            # into the same order as the anchors:
+            #
+            # bbox deltas will be (1, 4 * A, H, W) format
+            # transpose to (1, H, W, 4 * A)
+            # reshape to (1 * H * W * A, 4) where rows are ordered by (h, w, a)
+            # in slowest to fastest order
+            bbox_deltas = bbox_deltas.transpose((0, 2, 3, 1)).reshape((-1, 4))
+
+            # Same story for the scores:
+            #
+            # scores are (1, A, H, W) format
+            # transpose to (1, H, W, A)
+            # reshape to (1 * H * W * A, 1) where rows are ordered by (h, w, a)
+            scores = scores.transpose((0, 2, 3, 1)).reshape((-1, 1))
+
+            # Convert anchors into proposals via bbox transformations
+            proposals = bbox_transform_inv(anchors, bbox_deltas)
+
+            # 2. clip predicted boxes to image
+            proposals = clip_boxes(proposals, im_info[:2])
+
+            # 3. remove predicted boxes with either height or width < threshold
+            # (NOTE: convert min_size to input image scale stored in im_info[2])
+            keep = _filter_boxes(proposals, min_size * im_info[2])
+            proposals = proposals[keep, :]
+            scores = scores[keep]
+
+            # 4. sort all (proposal, score) pairs by score from highest to lowest
+            # 5. take top pre_nms_topN (e.g. 6000)
+            order = scores.ravel().argsort()[::-1]
+
+            if pre_nms_topN > 0:
+                order = order[:pre_nms_topN]
+
+            proposals = proposals[order, :]
+            scores = scores[order]
+
+            # 6. apply nms (e.g. threshold = 0.7)
+            # 7. take after_nms_topN (e.g. 300)
+            # 8. return the top proposals (-> RoIs top)
+            keep = nms(np.hstack((proposals, scores)), nms_thresh)
+
+            if post_nms_topN > 0:
+                keep = keep[:post_nms_topN]
+
+            proposals = proposals[keep, :]
+            scores = scores[keep]
+
+            # Output rois blob
+            # Our RPN implementation only supports a single input image, so all
+            # batch inds are 0
+            batch_inds = np.zeros((proposals.shape[0], 1), dtype=np.float32)
+            blob = np.hstack(
+                (batch_inds, proposals.astype(np.float32, copy=False))
+            )
+            
+            top[0].reshape(*(blob.shape))
+            top[0].data[...] = blob
+
+            # [Optional] output scores blob
+            if len(top) > 1:
+                top[1].reshape(*(scores.shape))
+                top[1].data[...] = scores
 
     def backward(self, top, propagate_down, bottom):
         """
