@@ -69,7 +69,7 @@ class RoIDataLayer(caffe.Layer):
     
     def _get_next_sequence_inds(self):
         """Retun the roidb indices for the next minibatch in sequential order."""
-        db_inds = self._perm[self._cur:self._cur+cfg.TRAIN.__C.TRAIN.VIDEO_CLIP_LENGTH * cfg.TRAIN.FRAME_PER_BATCH]
+        db_inds = self._perm[self._cur:self._cur+cfg.TRAIN.VIDEO_CLIP_LENGTH * cfg.TRAIN.FRAME_PER_BATCH]
         self.cur += cfg.TRAIN.FRAME_PER_BATCH
         
         return db_inds        
@@ -119,6 +119,7 @@ class RoIDataLayer(caffe.Layer):
         
         # support sequential data for LSTM training
         self._lstm = layer_params.get('lstm', 'off')
+        #self._lstm = 'on'
         
         self._name_to_top_map = {}
         
@@ -134,12 +135,12 @@ class RoIDataLayer(caffe.Layer):
             self._name_to_top_map['data'] = idx
             idx += 1
             
-            top[idx].reshape(1, 3)
+            top[idx].reshape(50, 3)
             self._name_to_top_map['im_info'] = idx
             idx += 1
             
             # gt_boxes blob n, x1, y1, x2, y2, class
-            top[idx].reshape(1,6)
+            top[idx].reshape(50,6)
             self._name_to_top_map['gt_boxes'] = idx
             idx += 1
 

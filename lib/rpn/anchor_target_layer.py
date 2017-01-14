@@ -33,6 +33,7 @@ class AnchorTargetLayer(caffe.Layer):
         
         # support sequential data for LSTM training
         self._lstm = layer_params.get('lstm', 'off')
+        #self._lstm = 'on'
         
 
         if DEBUG:
@@ -61,14 +62,26 @@ class AnchorTargetLayer(caffe.Layer):
             print('AnchorTargetLayer: height', height, 'width', width)
 
         A = self._num_anchors
-        # labels
-        top[0].reshape(1, 1, A * height, width)
-        # bbox_targets
-        top[1].reshape(1, A * 4, height, width)
-        # bbox_inside_weights
-        top[2].reshape(1, A * 4, height, width)
-        # bbox_outside_weights
-        top[3].reshape(1, A * 4, height, width)
+        
+        
+        if self._lstm is 'on':
+            # labels
+            top[0].reshape(50, 1, A * height, width)    
+            # bbox_targets
+            top[1].reshape(50, A * 4, height, width)
+            # bbox_inside_weights
+            top[2].reshape(50, A * 4, height, width)
+            # bbox_outside_weights
+            top[3].reshape(50, A * 4, height, width)
+        else:
+            # labels
+            top[0].reshape(1, 1, A * height, width)
+            # bbox_targets
+            top[1].reshape(1, A * 4, height, width)
+            # bbox_inside_weights
+            top[2].reshape(1, A * 4, height, width)
+            # bbox_outside_weights
+            top[3].reshape(1, A * 4, height, width)
 
     def forward(self, bottom, top):
         # Algorithm:

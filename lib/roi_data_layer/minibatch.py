@@ -128,7 +128,6 @@ def get_next_sequence(roidb, num_classes):
     
     # clip_markers: TxN flags to control whether the previous state should be kelpt
     # T is the time length and N is the data length per unit time
-    # Set the bias to the forget gate to 5.0 as explained in the clockwork RNN paper
     clip_markers_blob = np.ones((blobs['data'].shape[0], 1,1,1), dtype=np.float32)
     clip_markers_blob[0:cfg.TRAIN.FRAME_PER_BATCH,:,:,:] = 0
     
@@ -281,7 +280,7 @@ def _get_seq_image_blob(roidb, scale_inds):
     # Create a blob to hold the input images
     blob = im_list_to_blob(processed_ims)
 
-    return blob, im_scales. im_info_blob
+    return blob, im_scales, im_info_blob
 
 def _project_im_rois(im_rois, im_scale_factor):
     """

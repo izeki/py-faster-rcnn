@@ -41,20 +41,32 @@ class ProposalLayer(caffe.Layer):
         
         # support sequential data for LSTM training
         self._lstm = layer_params.get('lstm', 'off')
-
+        #self._lstm = 'on'
+        
         if DEBUG:
             print('feat_stride: {}'.format(self._feat_stride))
             print('anchors:')
             print(self._anchors)
+        
+        if self._lstm is 'on':
+            # rois blob: holds R regions of interest, each is a 5-tuple
+            # (n, x1, y1, x2, y2) specifying an image batch index n and a
+            # rectangle (x1, y1, x2, y2)
+            top[0].reshape(50, 100, 5)
 
-        # rois blob: holds R regions of interest, each is a 5-tuple
-        # (n, x1, y1, x2, y2) specifying an image batch index n and a
-        # rectangle (x1, y1, x2, y2)
-        top[0].reshape(1, 5)
+            # scores blob: holds scores for R regions of interest
+            if len(top) > 1:
+                top[1].reshape(50, 100, 1)
+        else:    
 
-        # scores blob: holds scores for R regions of interest
-        if len(top) > 1:
-            top[1].reshape(1, 1, 1, 1)
+            # rois blob: holds R regions of interest, each is a 5-tuple
+            # (n, x1, y1, x2, y2) specifying an image batch index n and a
+            # rectangle (x1, y1, x2, y2)
+            top[0].reshape(1, 5)
+
+            # scores blob: holds scores for R regions of interest
+            if len(top) > 1:
+                top[1].reshape(1, 1, 1, 1)
 
     def forward(self, bottom, top):
         # Algorithm:

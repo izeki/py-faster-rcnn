@@ -28,17 +28,25 @@ class ProposalTargetLayer(caffe.Layer):
         
         # support sequential data for LSTM training
         self._lstm = layer_params.get('lstm', 'off')
-
-        # sampled rois (0, x1, y1, x2, y2)
-        top[0].reshape(1, 5)
-        # labels
-        top[1].reshape(1, 1)
-        # bbox_targets
-        top[2].reshape(1, self._num_classes * 4)
-        # bbox_inside_weights
-        top[3].reshape(1, self._num_classes * 4)
-        # bbox_outside_weights
-        top[4].reshape(1, self._num_classes * 4)
+        #self._lstm = 'on'
+        
+        
+        if self._lstm is 'on':
+            # sampled rois (0, x1, y1, x2, y2)
+            top[0].reshape(50, 100, 5)
+            # labels
+            top[1].reshape(50, 100, 1)
+        else:    
+            # sampled rois (0, x1, y1, x2, y2)
+            top[0].reshape(1, 5)
+            # labels
+            top[1].reshape(1, 1)
+            # bbox_targets
+            top[2].reshape(1, self._num_classes * 4)
+            # bbox_inside_weights
+            top[3].reshape(1, self._num_classes * 4)
+            # bbox_outside_weights
+            top[4].reshape(1, self._num_classes * 4)           
 
     def forward(self, bottom, top):
         

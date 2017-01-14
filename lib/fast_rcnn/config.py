@@ -45,11 +45,11 @@ __C.TRAIN.MAX_SIZE = 1000
 # Images to use per minibatch
 __C.TRAIN.IMS_PER_BATCH = 2
 
-# Video clip length in second to use in sequential data generation for lstm training) 
-__C.TRAIN.VIDEO_CLIP_LENGTH = 20
+# Video clip length in second to use in sequential data generation (for lstm training) 
+__C.TRAIN.VIDEO_CLIP_LENGTH = 5
 
 # Frame rate per second to use in sequential data generation (for lstm training)
-__C.TRAIN.FRAME_PER_BATCH = 30
+__C.TRAIN.FRAME_PER_BATCH = 10
 
 # Minibatch size (number of regions of interest [ROIs])
 __C.TRAIN.BATCH_SIZE = 128
@@ -159,12 +159,21 @@ __C.TEST.BBOX_REG = True
 # Propose boxes
 __C.TEST.HAS_RPN = False
 
-# Video clip length in second to use in sequential data generation for lstm testing) 
-__C.TEST.VIDEO_CLIP_LENGTH = 20
+# Video length to test in minute (for lstm testing)
+__C.TEST.VIDEO_LENGTH = 5 
+
+
+# Sliding duration in second (for lstm testing)
+__C.TEST.SLIDE_DURATION = 1
+
+# Video clip length in second to use in sequential data generation (for lstm testing) 
+__C.TEST.VIDEO_CLIP_LENGTH = 5
 
 # Frame rate per second to use in sequential data generation (for lstm testing)
-__C.TEST.FRAME_PER_BATCH = 30
+__C.TEST.FRAME_PER_BATCH = 10
 
+# Number of video test batches (for lstm testing)
+__C.TEST.NUM_VIDEO_BATCHES = (__C.TEST.VIDEO_LENGTH * 60 - __C.TEST.VIDEO_CLIP_LENGTH) / __C.TEST.SLIDE_DURATION  + 1
 
 # Test using these proposals
 __C.TEST.PROPOSAL_METHOD = 'selective_search'
@@ -174,7 +183,7 @@ __C.TEST.RPN_NMS_THRESH = 0.7
 # Number of top scoring boxes to keep before apply NMS to RPN proposals
 __C.TEST.RPN_PRE_NMS_TOP_N = 6000
 # Number of top scoring boxes to keep after applying NMS to RPN proposals
-__C.TEST.RPN_POST_NMS_TOP_N = 300
+__C.TEST.RPN_POST_NMS_TOP_N = 100
 # Proposal height and width both need to be greater than RPN_MIN_SIZE (at orig image scale)
 __C.TEST.RPN_MIN_SIZE = 16
 

@@ -1,9 +1,9 @@
 #!/bin/bash
 # Usage:
-# ./experiments/scripts/caltech_rpn_end2end.sh GPU NET DATASET [options args to {train_net, test_rpn}.py]
+# ./experiments/scripts/lstm_rcnn.sh GPU NET DATASET [options args to {train_net,test_lstm_rcnn}.py]
 # DATASET is caltech.
 
-set -x
+sset -x
 set -e
 
 export PYTHONUNBUFFERED="True"
@@ -22,26 +22,26 @@ TEST_IMDB="caltech_test"
 PI_DIR="caltech"
 ITERS=70000
 
-LOG="experiments/logs/caltech_rpn_end2end_${NET}_${EXTRA_ARGS_SLUG}.txt.`date +'%Y-%m-%d_%H-%M-%S'`"
+LOG="experiments/logs/caltech_lstm_rcnn_${NET}_${EXTRA_ARGS_SLUG}.txt.`date +'%Y-%m-%d_%H-%M-%S'`"
 
 exec &> >(tee -a "$LOG")
 echo Logging output to "$LOG"
 
 time ./tools/train_net.py --gpu ${GPU_ID} \
-  --solver models/${PT_DIR}/${NET}/rpn_end2end/solver.prototxt \
+  --solver models/${PT_DIR}/${NET}/lstm_rcnn/solver.prototxt \
   --weights data/imagenet_models/${NET}.v2.caffemodel \
   --imdb ${TRAIN_IMDB} \
   --iters ${ITERS} \
-  --cfg experiments/cfgs/rpn_end2end.yml \
+  --cfg experiments/cfgs/lstm_rcnn.yml \
   ${EXTRA_ARGS}
 
 set +x
 NET_FINAL=`grep -B 1 "done solving" ${LOG} | grep "Wrote snapshot" | awk '{print $4}'`
 set -x
 
-time ./tools/test_rpn.py --gpu ${GPU_ID} \
-  --def models/${PT_DIR}/${NET}/rpn_end2end/test.prototxt \
+time ./tools/test_lstm_rcnn.py --gpu ${GPU_ID} \
+  --def models/${PT_DIR}/${NET}/lstm_rcnn/test.prototxt \
   --net ${NET_FINAL} \
   --imdb ${TEST_IMDB} \
-  --cfg experiments/cfgs/rpn_end2end.yml \
+  --cfg experiments/cfgs/lstm_rcnn.yml \
   ${EXTRA_ARGS}
